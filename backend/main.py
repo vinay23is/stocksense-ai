@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import google.generativeai as genai
+from google import genai as google_genai
 import os
 from dotenv import load_dotenv
 
@@ -240,22 +240,25 @@ async def get_ai_insight(symbol: str):
             )
 
         try:
-            genai.configure(api_key=gemini_key)
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            client = google_genai.Client(api_key=gemini_key)
 
-            prompt = f"""You are a financial market analyst providing educational insights.
-Analyze {company_name} ({symbol}) based on these data points:
+            prompt = (
+                f"You are a financial market analyst providing educational insights.\n"
+                f"Analyze {company_name} ({symbol}) based on these data points:\n\n"
+                f"- Current Price: ${current_price:.2f}\n"
+                f"- 1-Month Change: {change_pct:+.1f}%\n"
+                f"- RSI (14-day): {rsi:.1f}\n"
+                f"- Sector: {info.get('sector', 'Unknown')}\n"
+                f"- Industry: {info.get('industry', 'Unknown')}\n\n"
+                f"Write exactly 3-4 sentences in plain English for a general audience. "
+                f"Cover: recent price momentum, what the RSI reading suggests about "
+                f"current market sentiment, and one key factor investors are watching. "
+                f"Do NOT give specific buy/sell recommendations."
+            )
 
-- Current Price: ${current_price:.2f}
-- 1-Month Change: {change_pct:+.1f}%
-- RSI (14-day): {rsi:.1f}
-- Sector: {info.get('sector', 'Unknown')}
-- Industry: {info.get('industry', 'Unknown')}
-- Market Cap: {info.get('marketCap', 'Unknown')}
-
-Write exactly 3-4 sentences in plain English for a general audience. Cover: recent price momentum, what the RSI reading suggests about current market sentiment, and one key factor investors are watching. Do NOT give specific buy/sell recommendations."""
-
-            response = model.generate_content(prompt)
+            response = client.models.generate_content(
+                model="gemini-2.5-flash", contents=prompt
+            )
             return {
                 "symbol": symbol,
                 "company_name": company_name,
