@@ -12,9 +12,9 @@
 ![Vercel](https://img.shields.io/badge/Vercel-Frontend-000000?style=flat&logo=vercel&logoColor=white)
 ![Render](https://img.shields.io/badge/Render-Backend-46E3B7?style=flat&logo=render&logoColor=white)
 
-**Live Demo:** [https://stocksense-ai.vercel.app](https://stocksense-ai.vercel.app) ← _fill in after deploy_
+**Live Demo:** [https://stocksense-ai-ten.vercel.app](https://stocksense-ai-ten.vercel.app)
 
-![StockSense AI Dashboard Screenshot](https://via.placeholder.com/1200x630/0a0a0f/6366f1?text=StockSense+AI+Dashboard) ← _replace with real screenshot_
+**Backend API:** [https://stocksense-ai-17ld.onrender.com](https://stocksense-ai-17ld.onrender.com)
 
 ---
 
