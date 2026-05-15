@@ -34,20 +34,37 @@ def root():
     return {"message": "StockSense AI API is running", "version": "1.0.0"}
 
 
+def _safe_info(ticker) -> dict:
+    """Return ticker.info with fallback to empty dict if Yahoo's endpoint is flaky."""
+    try:
+        return ticker.info or {}
+    except Exception:
+        return {}
+
+
 @app.get("/stocks/{symbol}")
 def get_stock(symbol: str):
     symbol = symbol.upper()
     ticker = yf.Ticker(symbol)
-    info = ticker.info
     hist = ticker.history(period="5d")
 
     if hist.empty:
         raise HTTPException(status_code=404, detail=f"Symbol {symbol} not found")
 
+    fi = ticker.fast_info  # always reliable
+    info = _safe_info(ticker)  # best-effort for string fields
+
     current_price = float(hist["Close"].iloc[-1])
     prev_price = float(hist["Close"].iloc[-2]) if len(hist) > 1 else current_price
     change = current_price - prev_price
     change_pct = (change / prev_price) * 100
+
+    def _fi(attr, fallback=None):
+        try:
+            v = getattr(fi, attr, None)
+            return v if v is not None else fallback
+        except Exception:
+            return fallback
 
     return {
         "symbol": symbol,
@@ -55,12 +72,11 @@ def get_stock(symbol: str):
         "price": round(current_price, 2),
         "change": round(change, 2),
         "change_pct": round(change_pct, 2),
-        "market_cap": info.get("marketCap"),
-        "volume": info.get("volume"),
-        "avg_volume": info.get("averageVolume"),
-        "pe_ratio": info.get("trailingPE"),
-        "week_52_high": info.get("fiftyTwoWeekHigh"),
-        "week_52_low": info.get("fiftyTwoWeekLow"),
+        "market_cap": _fi("market_cap"),
+        "volume": _fi("three_month_average_volume") or info.get("volume"),
+        "avg_volume": _fi("three_month_average_volume"),
+        "week_52_high": _fi("year_high"),
+        "week_52_low": _fi("year_low"),
         "sector": info.get("sector"),
         "industry": info.get("industry"),
     }
@@ -187,7 +203,7 @@ async def get_ai_insight(symbol: str):
     symbol = symbol.upper()
     try:
         ticker = yf.Ticker(symbol)
-        info = ticker.info
+        info = _safe_info(ticker)
         hist = ticker.history(period="1mo")
 
         if hist.empty:
@@ -199,31 +215,35 @@ async def get_ai_insight(symbol: str):
         rsi = _calc_rsi(hist["Close"])
         company_name = info.get("longName", symbol)
 
-        gemini_key = os.getenv("GEMINI_API_KEY")
-        if not gemini_key:
-            sentiment = (
-                "overbought" if rsi > 70 else "oversold" if rsi < 30 else "neutral"
-            )
-            fallback = (
-                f"{company_name} is currently trading at ${current_price:.2f}, "
-                f"showing a {change_pct:+.1f}% move over the past month. "
-                f"The RSI of {rsi:.1f} indicates {sentiment} conditions. "
-                f"Configure GEMINI_API_KEY in your .env file to enable AI-powered insights."
-            )
+        def _fallback_insight(reason_suffix: str) -> dict:
+            sentiment = "overbought" if rsi > 70 else "oversold" if rsi < 30 else "neutral"
             return {
                 "symbol": symbol,
                 "company_name": company_name,
-                "insight": fallback,
+                "insight": (
+                    f"{company_name} is currently trading at ${current_price:.2f}, "
+                    f"showing a {change_pct:+.1f}% move over the past month. "
+                    f"The RSI of {rsi:.1f} indicates {sentiment} conditions. "
+                    f"{reason_suffix}"
+                ),
                 "price": round(current_price, 2),
                 "change_pct": round(change_pct, 2),
                 "rsi": round(rsi, 2),
                 "ai_powered": False,
             }
 
-        genai.configure(api_key=gemini_key)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        gemini_key = os.getenv("GEMINI_API_KEY", "")
+        placeholder = not gemini_key or gemini_key.startswith("your_")
+        if placeholder:
+            return _fallback_insight(
+                "Add a real GEMINI_API_KEY to your .env file to enable AI-powered insights."
+            )
 
-        prompt = f"""You are a financial market analyst providing educational insights.
+        try:
+            genai.configure(api_key=gemini_key)
+            model = genai.GenerativeModel("gemini-1.5-flash")
+
+            prompt = f"""You are a financial market analyst providing educational insights.
 Analyze {company_name} ({symbol}) based on these data points:
 
 - Current Price: ${current_price:.2f}
@@ -235,22 +255,58 @@ Analyze {company_name} ({symbol}) based on these data points:
 
 Write exactly 3-4 sentences in plain English for a general audience. Cover: recent price momentum, what the RSI reading suggests about current market sentiment, and one key factor investors are watching. Do NOT give specific buy/sell recommendations."""
 
-        response = model.generate_content(prompt)
-
-        return {
-            "symbol": symbol,
-            "company_name": company_name,
-            "insight": response.text,
-            "price": round(current_price, 2),
-            "change_pct": round(change_pct, 2),
-            "rsi": round(rsi, 2),
-            "ai_powered": True,
-        }
+            response = model.generate_content(prompt)
+            return {
+                "symbol": symbol,
+                "company_name": company_name,
+                "insight": response.text,
+                "price": round(current_price, 2),
+                "change_pct": round(change_pct, 2),
+                "rsi": round(rsi, 2),
+                "ai_powered": True,
+            }
+        except Exception:
+            return _fallback_insight(
+                "AI insight unavailable — check your GEMINI_API_KEY."
+            )
 
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _parse_news_item(item: dict):
+    """Handle both old (flat) and new (nested content) yfinance news formats."""
+    # yfinance >= 1.x nests everything under 'content'
+    content = item.get("content", item)
+    title = content.get("title", "")
+    if not title:
+        return None
+
+    # publisher: nested provider.displayName or flat publisher
+    provider = content.get("provider", {})
+    publisher = provider.get("displayName", "") or content.get("publisher", "")
+
+    # URL: nested canonicalUrl.url or clickThroughUrl.url or flat link
+    canonical = content.get("canonicalUrl", {}) or {}
+    click = content.get("clickThroughUrl", {}) or {}
+    link = canonical.get("url") or click.get("url") or content.get("link", "")
+
+    # timestamp: pubDate ISO string (new) or providerPublishTime epoch (old)
+    pub_date = content.get("pubDate", "")
+    pub_ts = content.get("providerPublishTime", 0)
+    if pub_date and not pub_ts:
+        try:
+            from datetime import datetime, timezone
+            pub_ts = int(
+                datetime.fromisoformat(pub_date.replace("Z", "+00:00"))
+                .timestamp()
+            )
+        except Exception:
+            pub_ts = 0
+
+    return {"title": title, "publisher": publisher, "link": link, "published_at": pub_ts}
 
 
 @app.get("/news/{symbol}")
@@ -259,14 +315,12 @@ def get_news(symbol: str):
     ticker = yf.Ticker(symbol)
     raw_news = ticker.news or []
 
-    news = [
-        {
-            "title": item.get("title", ""),
-            "publisher": item.get("publisher", ""),
-            "link": item.get("link", ""),
-            "published_at": item.get("providerPublishTime", 0),
-        }
-        for item in raw_news[:8]
-    ]
+    news = []
+    for item in raw_news:
+        parsed = _parse_news_item(item)
+        if parsed is not None:
+            news.append(parsed)
+        if len(news) >= 8:
+            break
 
     return {"symbol": symbol, "news": news}
