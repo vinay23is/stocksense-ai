@@ -7,6 +7,8 @@ from google import genai as google_genai
 import os
 from dotenv import load_dotenv
 
+from request_logger import RequestLoggerMiddleware, init_db, get_metrics
+
 load_dotenv()
 
 app = FastAPI(title="StockSense AI API", version="1.0.0")
@@ -18,6 +20,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestLoggerMiddleware)
+
+init_db()
 
 
 def _calc_rsi(close: pd.Series, period: int = 14) -> float:
@@ -32,6 +37,11 @@ def _calc_rsi(close: pd.Series, period: int = 14) -> float:
 @app.get("/")
 def root():
     return {"message": "StockSense AI API is running", "version": "1.0.0"}
+
+
+@app.get("/metrics")
+def metrics():
+    return get_metrics()
 
 
 def _safe_info(ticker) -> dict:
